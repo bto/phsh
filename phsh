@@ -1,0 +1,208 @@
+#!/usr/bin/env php
+<?php
+// disable E_STRICT
+if (defined('E_STRICT')) {
+    ini_set('error_reporting', ini_get('error_reporting')&~E_STRICT);
+}
+
+require_once 'Console/Getopt.php';
+
+
+class PHSH
+{
+    var $options = array();
+
+    function phsh()
+    {
+        $this->initialize();
+    }
+
+    function initialize()
+    {
+        $this->options = array(
+            'help'         => false,
+            'history_file' => "{$_ENV['HOME']}/.phsh_history",
+            'login'        => false,
+            'login_file'   => "{$_ENV['HOME']}/.phsh_login",
+            'rc_file'      => "{$_ENV['HOME']}/.phshrc");
+    }
+
+    function &addHistory(&$line)
+    {
+        static $last_line = '';
+
+        if ($line != $last_line) {
+            readline_add_history($line);
+            readline_write_history($this->options['history_file']);
+            $last_line = $line;
+        }
+
+        return $line;
+    }
+
+    function executeShell($command_line = null)
+    {
+        $pid = pcntl_fork();
+        if ($pid == 0) {
+            $path = '/bin/sh';
+            $args = array();
+            if ($command_line) {
+                $args = array('-c', $command_line);
+            }
+            exit(pcntl_exec($path, $args));
+        }
+        return pcntl_waitpid($pid, $status);
+    }
+
+    function getProgramName()
+    {
+        $argv = Console_Getopt::readPHPArgv();
+        return basename($argv[0]);
+    }
+
+    function isCallable(&$line)
+    {
+        $regex = '/^[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*/';
+        return preg_match($regex, $line, $matches) && !is_callable($matches[0]);
+    }
+
+    function main()
+    {
+        if (PEAR::isError($this->parseOptions())) {
+            fwrite(STDERR, "Invalid options\n");
+            $this->usage(1);
+        }
+
+        if ($this->options['help']) {
+            $this->usage();
+        }
+
+        readline_completion_function('__phshCompletion');
+
+        return $this->mainLoop();
+    }
+
+    function mainLoop()
+    {
+        if ($this->options['login'] && file_exists($this->options['login_file'])) {
+            include($this->options['login_file']);
+        }
+
+        if (file_exists($this->options['rc_file'])) {
+            include($this->options['rc_file']);
+        }
+
+        readline_read_history($this->options['history_file']);
+        $__phsh = array();
+        @ob_flush();
+
+        while (true) {
+            $__phsh['line'] = $this->modifyCommandLine($this->addHistory(
+                readline('<?php ')));
+            if ($__phsh['line']) {
+                $this->printResult(eval($__phsh['line']));
+            }
+            @ob_flush();
+        }
+    }
+
+    function &modifyCommandLine(&$line)
+    {
+        $new_line = trim($line);
+        if (!$new_line) {
+            return $new_line;
+        }
+
+        if ($new_line[0] == '#') {
+            $this->executeShell(trim(substr($new_line, 1)));
+            $new_line = '';
+        } else if (substr($new_line, -2) == '?>') {
+            $new_line = 'exit;';
+        } else if ($this->isCallable($new_line)) {
+            $new_line = "{$new_line}; return;";
+        } else {
+            $new_line = "return {$new_line};";
+        }
+
+        return $new_line;
+    }
+
+    function &parseOptions()
+    {
+        $console_getopt = new Console_Getopt;
+        $longoptions = array('help', 'login');
+        $options = array();
+        $shortoptions = 'hl';
+
+        $result = $console_getopt->getopt(
+            $console_getopt->readPHPArgv(), $shortoptions, $longoptions);
+        if (PEAR::isError($result)) {
+            return $result;
+        }
+
+        $program_name = $this->getProgramName();
+        if ($program_name[0] == '-') {
+            $options['login'] = true;
+        }
+
+        foreach ($result[0] as $option) {
+            switch ($option[0]) {
+            case 'h':
+            case '--help':
+                $options['help'] = true;
+                break;
+            case 'l':
+            case '--login':
+                $options['login'] = true;
+                break;
+            }
+        }
+
+        $this->options = array_merge($this->options, $options);
+        return $this->options;
+    }
+
+    function printResult($result)
+    {
+        var_dump($result);
+        return true;
+    }
+
+    function usage($status = 0)
+    {
+        $program_name = $this->getProgramName();
+        $message = <<< EOS
+Usage: {$program_name} [options]
+    -h, --help         show this message
+    -l, --login        works as a login shell
+EOS;
+        fwrite(STDERR, $message."\n");
+        exit($status);
+    }
+
+    /******************
+     *                *
+     * static methods *
+     *                *
+     ******************/
+    function completion($line, $pos, $cursor)
+    {
+        $functions = get_defined_functions();
+        return array_merge(
+            $functions['internal'], $functions['user'],
+            array_keys(get_defined_constants()));
+    }
+}
+
+function __phshCompletion($line, $position, $cursor)
+{
+    return PHSH::completion($line, $position, $cursor);
+}
+
+// immediately return while required as a library
+if (debug_backtrace()) {
+    return;
+}
+
+$phsh = new PHSH;
+return $phsh->main();
